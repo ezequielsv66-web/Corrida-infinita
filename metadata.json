@@ -1,0 +1,6 @@
+{
+  "name": "CORRIDA INFINITA",
+  "description": "Jogo 3D de corrida infinita com visual moderno e realista, obstáculos dinâmicos, moedas, física fluida e suporte completo para PC e telemóvel.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
