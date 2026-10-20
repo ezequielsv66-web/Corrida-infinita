@@ -134,12 +134,21 @@ export const HowToPublishModal: React.FC<HowToPublishModalProps> = ({ onClose })
                 </div>
               </div>
 
-              {/* Option C: GitHub Pages */}
-              <div className="bg-slate-950/70 border border-slate-800 rounded-xl p-3.5 sm:col-span-2">
-                <div className="font-bold text-white text-sm">Opção C: GitHub Pages</div>
-                <p className="text-slate-400 mt-1">
-                  Envia o código para um repositório no GitHub, ativa o <b>GitHub Pages</b> nas Definições do repositório escolhendo a pasta raiz ou a branch <span className="font-mono text-cyan-300">gh-pages</span>, e o teu jogo fica acessível gratuitamente em <span className="text-cyan-300 font-mono">oteunome.github.io/corrida-infinita</span>.
-                </p>
+              {/* Option C: GitHub Pages com GitHub Actions */}
+              <div className="bg-slate-950/70 border border-cyan-500/30 rounded-xl p-3.5 sm:col-span-2">
+                <div className="flex items-center justify-between">
+                  <div className="font-bold text-white text-sm flex items-center gap-1.5">
+                    <span>Opção C: GitHub Pages (GitHub Actions Automático)</span>
+                    <span className="text-[10px] bg-cyan-950 text-cyan-300 border border-cyan-700 px-1.5 py-0.5 rounded font-mono">
+                      Configurado no projeto
+                    </span>
+                  </div>
+                </div>
+                <ol className="list-decimal list-inside text-slate-400 mt-2 space-y-1">
+                  <li>No GitHub, abre o teu repositório e clica em <b>Settings</b> &gt; <b>Pages</b>.</li>
+                  <li>Em <b>Build and deployment</b> &gt; <b>Source</b>, seleciona <b>GitHub Actions</b>.</li>
+                  <li>Faz <span className="font-mono text-cyan-300">git push</span> das alterações. O fluxo <span className="font-mono text-cyan-300">.github/workflows/deploy.yml</span> compilará e publicará o jogo automaticamente em <span className="text-cyan-300 font-mono">https://ezequielsv66-web.github.io/Corrida-infinita/</span>!</li>
+                </ol>
               </div>
             </div>
           </div>

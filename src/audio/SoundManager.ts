@@ -11,19 +11,25 @@ class SoundManager {
   private bgmStep: number = 0;
 
   constructor() {
-    const savedMute = localStorage.getItem('corrida_infinita_muted');
-    if (savedMute !== null) {
-      this.isMuted = savedMute === 'true';
+    try {
+      const savedMute = localStorage.getItem('corrida_infinita_muted');
+      if (savedMute !== null) {
+        this.isMuted = savedMute === 'true';
+      }
+    } catch {
+      // Ignore security errors in restricted iframes or incognito
     }
   }
 
   private initContext() {
-    if (!this.ctx) {
+    if (!this.ctx && typeof window !== 'undefined') {
       const AudioContextClass = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-      this.ctx = new AudioContextClass();
+      if (AudioContextClass) {
+        this.ctx = new AudioContextClass();
+      }
     }
-    if (this.ctx.state === 'suspended') {
-      this.ctx.resume();
+    if (this.ctx && this.ctx.state === 'suspended') {
+      this.ctx.resume().catch(() => {});
     }
   }
 
@@ -33,7 +39,11 @@ class SoundManager {
 
   public toggleMute(): boolean {
     this.isMuted = !this.isMuted;
-    localStorage.setItem('corrida_infinita_muted', String(this.isMuted));
+    try {
+      localStorage.setItem('corrida_infinita_muted', String(this.isMuted));
+    } catch {
+      // Ignore localStorage errors
+    }
     if (this.isMuted && this.bgmIntervalId !== null) {
       this.stopMusic();
     } else if (!this.isMuted && this.isMusicEnabled) {

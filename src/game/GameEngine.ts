@@ -141,11 +141,16 @@ export class GameEngine {
     this.onStatsUpdate = callbacks.onStatsUpdate;
     this.onGameOver = callbacks.onGameOver;
 
-    // Load persistent high score & total coins
-    const savedHighScore = parseInt(localStorage.getItem('corrida_infinita_highscore') || '0', 10);
-    const savedTotalCoins = parseInt(localStorage.getItem('corrida_infinita_total_coins') || '0', 10);
-    this.stats.highScore = isNaN(savedHighScore) ? 0 : savedHighScore;
-    this.stats.totalCoins = isNaN(savedTotalCoins) ? 0 : savedTotalCoins;
+    // Load persistent high score & total coins safely
+    try {
+      const savedHighScore = parseInt(localStorage.getItem('corrida_infinita_highscore') || '0', 10);
+      const savedTotalCoins = parseInt(localStorage.getItem('corrida_infinita_total_coins') || '0', 10);
+      this.stats.highScore = isNaN(savedHighScore) ? 0 : savedHighScore;
+      this.stats.totalCoins = isNaN(savedTotalCoins) ? 0 : savedTotalCoins;
+    } catch {
+      this.stats.highScore = 0;
+      this.stats.totalCoins = 0;
+    }
 
     this.initScene();
     this.initWorld();
@@ -461,8 +466,14 @@ export class GameEngine {
   }
 
   private resetStats() {
-    const savedHighScore = parseInt(localStorage.getItem('corrida_infinita_highscore') || '0', 10);
-    const savedTotalCoins = parseInt(localStorage.getItem('corrida_infinita_total_coins') || '0', 10);
+    let savedHighScore = 0;
+    let savedTotalCoins = 0;
+    try {
+      savedHighScore = parseInt(localStorage.getItem('corrida_infinita_highscore') || '0', 10);
+      savedTotalCoins = parseInt(localStorage.getItem('corrida_infinita_total_coins') || '0', 10);
+    } catch {
+      // Fallback if localStorage disabled
+    }
 
     this.stats = {
       score: 0,
@@ -490,14 +501,18 @@ export class GameEngine {
 
     this.emitBurst(this.runnerX, this.runnerY + 1, 0, 0xef4444, 30);
 
-    // Save high score and total coins
-    if (this.stats.score > this.stats.highScore) {
-      this.stats.highScore = this.stats.score;
-      this.stats.newHighScore = true;
-      localStorage.setItem('corrida_infinita_highscore', String(this.stats.highScore));
+    // Save high score and total coins safely
+    try {
+      if (this.stats.score > this.stats.highScore) {
+        this.stats.highScore = this.stats.score;
+        this.stats.newHighScore = true;
+        localStorage.setItem('corrida_infinita_highscore', String(this.stats.highScore));
+      }
+      this.stats.totalCoins += this.stats.coins;
+      localStorage.setItem('corrida_infinita_total_coins', String(this.stats.totalCoins));
+    } catch {
+      // Storage restricted
     }
-    this.stats.totalCoins += this.stats.coins;
-    localStorage.setItem('corrida_infinita_total_coins', String(this.stats.totalCoins));
 
     this.onGameOver?.(this.stats);
     this.onStatsUpdate?.(this.stats);
