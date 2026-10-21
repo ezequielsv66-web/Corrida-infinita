@@ -1,0 +1,97 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "User profile with private stats and coins",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "User unique identifier"
+        },
+        "username": {
+          "type": "string",
+          "description": "Public display name",
+          "minLength": 3,
+          "maxLength": 24
+        },
+        "email": {
+          "type": "string",
+          "description": "User email address"
+        },
+        "photoURL": {
+          "type": "string",
+          "description": "User avatar URL"
+        },
+        "highScore": {
+          "type": "number",
+          "description": "All time high score"
+        },
+        "totalCoins": {
+          "type": "number",
+          "description": "Total accumulated coins"
+        },
+        "maxDistance": {
+          "type": "number",
+          "description": "Longest distance run in meters"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Profile creation timestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last update timestamp"
+        }
+      },
+      "required": ["userId", "username", "highScore", "totalCoins", "maxDistance"]
+    },
+    "LeaderboardEntry": {
+      "title": "LeaderboardEntry",
+      "description": "Public leaderboard record without PII",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "User unique identifier"
+        },
+        "username": {
+          "type": "string",
+          "description": "Player runner name",
+          "minLength": 3,
+          "maxLength": 24
+        },
+        "photoURL": {
+          "type": "string",
+          "description": "Avatar URL"
+        },
+        "highScore": {
+          "type": "number",
+          "description": "Player record score"
+        },
+        "maxDistance": {
+          "type": "number",
+          "description": "Max distance in meters"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Score submission timestamp"
+        }
+      },
+      "required": ["userId", "username", "highScore", "maxDistance"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "UserProfile",
+      "description": "Private player profile storing coin inventory and stats"
+    },
+    "/leaderboard/{userId}": {
+      "schema": "LeaderboardEntry",
+      "description": "Public high score rankings for global competition"
+    }
+  }
+}

@@ -1,0 +1,59 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Default deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['userId', 'username', 'highScore', 'totalCoins', 'maxDistance']) &&
+             data.userId is string && data.userId == request.auth.uid &&
+             data.username is string && data.username.size() >= 3 && data.username.size() <= 24 &&
+             data.highScore is number && data.highScore >= 0 &&
+             data.totalCoins is number && data.totalCoins >= 0 &&
+             data.maxDistance is number && data.maxDistance >= 0;
+    }
+
+    function isValidLeaderboard(data) {
+      return data.keys().hasAll(['userId', 'username', 'highScore', 'maxDistance']) &&
+             data.userId is string && data.userId == request.auth.uid &&
+             data.username is string && data.username.size() >= 3 && data.username.size() <= 24 &&
+             data.highScore is number && data.highScore >= 0 &&
+             data.maxDistance is number && data.maxDistance >= 0;
+    }
+
+    // Private User Profile Collection
+    match /users/{userId} {
+      allow read: if isSignedIn() && request.auth.uid == userId;
+      allow create: if isSignedIn() && request.auth.uid == userId && isValidId(userId) && isValidUser(incoming());
+      allow update: if isSignedIn() && request.auth.uid == userId && isValidId(userId) && isValidUser(incoming());
+      allow delete: if false;
+    }
+
+    // Public Global Leaderboard Collection
+    match /leaderboard/{userId} {
+      allow read: if true;
+      allow create: if isSignedIn() && request.auth.uid == userId && isValidId(userId) && isValidLeaderboard(incoming());
+      allow update: if isSignedIn() && request.auth.uid == userId && isValidId(userId) && isValidLeaderboard(incoming());
+      allow delete: if false;
+    }
+  }
+}

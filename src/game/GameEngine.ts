@@ -1,15 +1,20 @@
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
-import { createRoadTexture, createGlowTexture } from './textures';
+import { createRailwayTexture, createGlowTexture } from './textures';
 import {
-  LANE_WIDTH,
+  TRACK_WIDTH,
+  TRAIN_ROOF_HEIGHT,
   createRunnerModel,
   RunnerModelNodes,
+  createInspectorModel,
+  InspectorModelNodes,
+  createPitbullDogModel,
+  DogModelNodes,
   createObstacleModel,
   createCoinModel,
   createPowerUpModel,
-  createHighwayArch,
-  createStreetLight,
+  createSubwayTunnel,
+  createSignalPost,
   createSkyscraper,
 } from './models';
 import { soundManager } from '../audio/SoundManager';
@@ -23,6 +28,8 @@ interface ActiveObstacle {
   z: number;
   cleared: boolean;
   box: THREE.Box3;
+  isMoving?: boolean;
+  hornPlayed?: boolean;
 }
 
 interface ActiveCoin {
@@ -43,17 +50,17 @@ interface ActivePowerUp {
   collected: boolean;
 }
 
-interface RoadChunk {
+interface TrackBedChunk {
   mesh: THREE.Mesh;
   z: number;
 }
 
-interface ArchEntry {
+interface TunnelEntry {
   mesh: THREE.Group;
   z: number;
 }
 
-interface LightPoleEntry {
+interface SignalPostEntry {
   mesh: THREE.Group;
   z: number;
 }
@@ -76,23 +83,37 @@ export class GameEngine {
     totalCoins: 0,
     distance: 0,
     speed: 24,
-    shieldActive: false,
+    scoreMultiplier: 30,
+    hoverboardActive: false,
+    hoverboardTimeLeft: 0,
+    hoverboardsAvailable: 3,
+    jetpackActive: false,
+    jetpackTimeLeft: 0,
+    sneakersActive: false,
+    sneakersTimeLeft: 0,
     magnetActive: false,
-    multiplierActive: false,
     magnetTimeLeft: 0,
+    multiplierActive: false,
     multiplierTimeLeft: 0,
+    shieldActive: false,
     newHighScore: false,
+    mysteryBoxesCollected: 0,
+    lettersCollected: [],
+    inspectorAlert: true,
   };
 
   private onStatsUpdate?: (stats: GameStats) => void;
   private onGameOver?: (finalStats: GameStats) => void;
 
-  // Runner
+  // Runner kinematics
   private runnerNodes!: RunnerModelNodes;
+  private inspectorNodes!: InspectorModelNodes;
+  private dogNodes!: DogModelNodes;
   private currentLane: LaneIndex = 0;
   private targetLane: LaneIndex = 0;
   private runnerX: number = 0;
   private runnerY: number = 0;
+  private baseY: number = 0; // 0 for ground, 3.2 for train roof, 8.5 for jetpack
   private velocityY: number = 0;
   private isJumping: boolean = false;
   private isSliding: boolean = false;
@@ -100,16 +121,23 @@ export class GameEngine {
   private runCycle: number = 0;
   private rollAngle: number = 0;
 
-  // World & Spawning
-  private roadChunks: RoadChunk[] = [];
-  private roadTexture!: THREE.CanvasTexture;
-  private arches: ArchEntry[] = [];
-  private lightPoles: LightPoleEntry[] = [];
+  // Inspector & Dog Chase Dynamics
+  private inspectorZ: number = 3.2; // Distance behind runner (0 is runner position)
+  private inspectorTargetZ: number = 3.2;
+  private inspectorRunCycle: number = 0;
+  private inspectorActive: boolean = true;
+  private chaseAlertTimer: number = 0;
+
+  // Railway Chunks & World
+  private trackChunks: TrackBedChunk[] = [];
+  private trackTexture!: THREE.CanvasTexture;
+  private tunnels: TunnelEntry[] = [];
+  private signalPosts: SignalPostEntry[] = [];
   private obstacles: ActiveObstacle[] = [];
   private coins: ActiveCoin[] = [];
   private powerUps: ActivePowerUp[] = [];
-  private nextObstacleZ: number = -40;
-  private nextPowerUpDistance: number = 250;
+  private nextObstacleZ: number = -50;
+  private nextPowerUpDistance: number = 180;
   private objectIdCounter: number = 0;
 
   // Particles
@@ -126,9 +154,12 @@ export class GameEngine {
   // Speed lines
   private speedLines!: THREE.LineSegments;
 
-  // Camera Shake
+  // Camera Shake & Hitstop
   private cameraShake: number = 0;
   private hitstopTimer: number = 0;
+
+  // Double-tap Space detection
+  private lastSpacePressTime: number = 0;
 
   constructor(
     container: HTMLElement,
@@ -141,20 +172,23 @@ export class GameEngine {
     this.onStatsUpdate = callbacks.onStatsUpdate;
     this.onGameOver = callbacks.onGameOver;
 
-    // Load persistent high score & total coins safely
+    // Load persistent records
     try {
       const savedHighScore = parseInt(localStorage.getItem('corrida_infinita_highscore') || '0', 10);
       const savedTotalCoins = parseInt(localStorage.getItem('corrida_infinita_total_coins') || '0', 10);
+      const savedBoards = parseInt(localStorage.getItem('corrida_infinita_boards') || '3', 10);
       this.stats.highScore = isNaN(savedHighScore) ? 0 : savedHighScore;
       this.stats.totalCoins = isNaN(savedTotalCoins) ? 0 : savedTotalCoins;
+      this.stats.hoverboardsAvailable = isNaN(savedBoards) ? 3 : Math.max(1, savedBoards);
     } catch {
       this.stats.highScore = 0;
       this.stats.totalCoins = 0;
+      this.stats.hoverboardsAvailable = 3;
     }
 
     this.initScene();
     this.initWorld();
-    this.initRunner();
+    this.initCharacters();
     this.initParticles();
     this.initSpeedLines();
     this.setupWindowListeners();
@@ -168,92 +202,88 @@ export class GameEngine {
     const width = this.container.clientWidth || window.innerWidth;
     const height = this.container.clientHeight || window.innerHeight;
 
-    // Renderer setup
+    const isMobile = /Android|iPhone|iPad|iPod|webOS|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+    const pixelRatio = isMobile ? Math.min(window.devicePixelRatio, 1.5) : Math.min(window.devicePixelRatio, 2);
+
     this.renderer = new THREE.WebGLRenderer({
       powerPreference: 'high-performance',
-      antialias: true,
+      antialias: !isMobile,
       stencil: false,
       depth: true,
     });
     this.renderer.setSize(width, height);
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    this.renderer.setPixelRatio(pixelRatio);
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.15;
-    this.renderer.shadowMap.enabled = true;
+    this.renderer.toneMappingExposure = 1.3;
+    this.renderer.shadowMap.enabled = !isMobile;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
     this.container.appendChild(this.renderer.domElement);
 
-    // Scene & Fog (Atmospheric night highway with subtle dusk blue/indigo)
+    // Vibrant Sunny Daylight Subway Surfers Blue Sky
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0x060913);
-    this.scene.fog = new THREE.FogExp2(0x060913, 0.012);
+    this.scene.background = new THREE.Color(0x38bdf8); // Sunny azure sky
+    this.scene.fog = new THREE.FogExp2(0x7dd3fc, 0.008);
 
-    // Camera
+    // 3rd Person Perspective Camera behind runner
     this.camera = new THREE.PerspectiveCamera(65, width / height, 0.1, 400);
     this.camera.position.set(0, 3.8, 7.5);
     this.camera.lookAt(0, 1.4, -12);
 
-    // Studio Environment reflection
+    // Studio Environment lighting
     const pmrem = new THREE.PMREMGenerator(this.renderer);
     this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
     pmrem.dispose();
 
-    // Lighting: Key Warm Directional Light with tight shadow frustum
-    const dirLight = new THREE.DirectionalLight(0xfff1e6, 2.8);
-    dirLight.position.set(15, 25, 10);
-    dirLight.castShadow = true;
-    dirLight.shadow.mapSize.width = 1024;
-    dirLight.shadow.mapSize.height = 1024;
-    dirLight.shadow.camera.near = 0.5;
-    dirLight.shadow.camera.far = 70;
-    dirLight.shadow.camera.left = -12;
-    dirLight.shadow.camera.right = 12;
-    dirLight.shadow.camera.top = 18;
-    dirLight.shadow.camera.bottom = -6;
-    dirLight.shadow.bias = -0.0005;
-    dirLight.shadow.normalBias = 0.02;
-    this.scene.add(dirLight);
+    // Warm Golden Key Sunlight
+    const sunLight = new THREE.DirectionalLight(0xfffbeb, 3.4);
+    sunLight.position.set(22, 34, 18);
+    sunLight.castShadow = !isMobile;
+    sunLight.shadow.mapSize.width = 1024;
+    sunLight.shadow.mapSize.height = 1024;
+    sunLight.shadow.camera.near = 0.5;
+    sunLight.shadow.camera.far = 85;
+    sunLight.shadow.camera.left = -16;
+    sunLight.shadow.camera.right = 16;
+    sunLight.shadow.camera.top = 22;
+    sunLight.shadow.camera.bottom = -6;
+    sunLight.shadow.bias = -0.0005;
+    sunLight.shadow.normalBias = 0.02;
+    this.scene.add(sunLight);
 
-    // Cool fill light: HemisphereLight (sky cyan/blue, ground slate)
-    const hemiLight = new THREE.HemisphereLight(0x38bdf8, 0x0f172a, 1.2);
+    // Warm Ambient sky fill
+    const hemiLight = new THREE.HemisphereLight(0xbae6fd, 0x1e293b, 1.4);
     this.scene.add(hemiLight);
-
-    // Subtle front road accent light
-    const frontLight = new THREE.PointLight(0x06b6d4, 1.5, 25);
-    frontLight.position.set(0, 3, -4);
-    this.scene.add(frontLight);
   }
 
   private initWorld() {
-    this.roadTexture = createRoadTexture();
-    this.roadTexture.repeat.set(1, 10);
+    this.trackTexture = createRailwayTexture();
+    this.trackTexture.repeat.set(1, 8);
 
-    const roadGeo = new THREE.PlaneGeometry(13.2, 50);
-    roadGeo.rotateX(-Math.PI / 2);
+    const trackBedGeo = new THREE.PlaneGeometry(13.2, 50);
+    trackBedGeo.rotateX(-Math.PI / 2);
 
-    const roadMat = new THREE.MeshStandardMaterial({
-      map: this.roadTexture,
+    const trackBedMat = new THREE.MeshStandardMaterial({
+      map: this.trackTexture,
       roughness: 0.8,
-      metalness: 0.15,
+      metalness: 0.25,
     });
 
-    // 6 chunks spanning from Z = 25 down to Z = -225
     for (let i = 0; i < 6; i++) {
       const z = 25 - i * 50;
-      const mesh = new THREE.Mesh(roadGeo, roadMat);
+      const mesh = new THREE.Mesh(trackBedGeo, trackBedMat);
       mesh.receiveShadow = true;
       mesh.position.set(0, 0, z);
       this.scene.add(mesh);
-      this.roadChunks.push({ mesh, z });
+      this.trackChunks.push({ mesh, z });
     }
 
-    // Ground terrain outside road (dark terrain plane)
-    const terrainGeo = new THREE.PlaneGeometry(240, 300);
+    // Outer embankment terrain (Warm gravel terrain)
+    const terrainGeo = new THREE.PlaneGeometry(260, 320);
     terrainGeo.rotateX(-Math.PI / 2);
     const terrainMat = new THREE.MeshStandardMaterial({
-      color: 0x04060a,
+      color: 0x1e293b,
       roughness: 0.95,
       metalness: 0.05,
     });
@@ -262,34 +292,34 @@ export class GameEngine {
     terrain.receiveShadow = true;
     this.scene.add(terrain);
 
-    // Overhead Arches
-    for (let i = 0; i < 5; i++) {
-      const arch = createHighwayArch();
-      const z = -40 - i * 55;
-      arch.position.set(0, 0, z);
-      this.scene.add(arch);
-      this.arches.push({ mesh: arch, z });
+    // Subway Brick Tunnel Arches
+    for (let i = 0; i < 4; i++) {
+      const tunnel = createSubwayTunnel();
+      const z = -60 - i * 65;
+      tunnel.position.set(0, 0, z);
+      this.scene.add(tunnel);
+      this.tunnels.push({ mesh: tunnel, z });
     }
 
-    // Street Light Poles along the left and right curbs
-    for (let i = 0; i < 12; i++) {
+    // Signal Posts
+    for (let i = 0; i < 10; i++) {
       const isRight = i % 2 === 0;
-      const pole = createStreetLight(isRight);
-      const z = -15 - i * 22;
-      pole.position.set(isRight ? 7.2 : -7.2, 0, z);
-      this.scene.add(pole);
-      this.lightPoles.push({ mesh: pole, z });
+      const post = createSignalPost(isRight);
+      const z = -20 - i * 26;
+      post.position.set(isRight ? 7.2 : -7.2, 0, z);
+      this.scene.add(post);
+      this.signalPosts.push({ mesh: post, z });
     }
 
-    // Distant procedural skyscraper skyline flanking both sides
+    // City Skyline with skyscrapers
     const skylineGroup = new THREE.Group();
-    for (let i = 0; i < 26; i++) {
+    for (let i = 0; i < 28; i++) {
       const isRight = i % 2 === 0;
-      const height = 40 + Math.random() * 80;
-      const width = 12 + Math.random() * 16;
-      const depth = 12 + Math.random() * 16;
+      const height = 45 + Math.random() * 85;
+      const width = 12 + Math.random() * 18;
+      const depth = 12 + Math.random() * 18;
       const building = createSkyscraper(height, width, depth);
-      const x = (isRight ? 1 : -1) * (26 + Math.random() * 50);
+      const x = (isRight ? 1 : -1) * (26 + Math.random() * 45);
       const z = -20 - i * 16;
       building.position.set(x, height / 2, z);
       skylineGroup.add(building);
@@ -297,10 +327,21 @@ export class GameEngine {
     this.scene.add(skylineGroup);
   }
 
-  private initRunner() {
+  private initCharacters() {
+    // 1. Subway Surfers Runner (Jake)
     this.runnerNodes = createRunnerModel();
     this.runnerNodes.group.position.set(0, 0, 0);
     this.scene.add(this.runnerNodes.group);
+
+    // 2. Inspector (O Guarda)
+    this.inspectorNodes = createInspectorModel();
+    this.inspectorNodes.group.position.set(0, 0, 3.2);
+    this.scene.add(this.inspectorNodes.group);
+
+    // 3. Pitbull Dog (O Cãozinho)
+    this.dogNodes = createPitbullDogModel();
+    this.dogNodes.group.position.set(-0.85, 0, 3.6);
+    this.scene.add(this.dogNodes.group);
   }
 
   private initParticles() {
@@ -313,9 +354,9 @@ export class GameEngine {
       depthWrite: false,
     });
 
-    const particleGeo = new THREE.PlaneGeometry(0.3, 0.3);
+    const particleGeo = new THREE.PlaneGeometry(0.35, 0.35);
 
-    for (let i = 0; i < 60; i++) {
+    for (let i = 0; i < 85; i++) {
       const mesh = new THREE.Mesh(particleGeo, particleMat.clone());
       mesh.visible = false;
       this.particleGroup.add(mesh);
@@ -332,12 +373,12 @@ export class GameEngine {
   }
 
   private initSpeedLines() {
-    const lineCount = 40;
-    const positions = new Float32Array(lineCount * 6); // 2 vertices per line
+    const lineCount = 36;
+    const positions = new Float32Array(lineCount * 6);
 
     for (let i = 0; i < lineCount; i++) {
       const x = (Math.random() - 0.5) * 16;
-      const y = 0.5 + Math.random() * 5;
+      const y = 0.5 + Math.random() * 8;
       const z = -10 - Math.random() * 60;
       const len = 4 + Math.random() * 6;
 
@@ -355,9 +396,9 @@ export class GameEngine {
     geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
 
     const mat = new THREE.LineBasicMaterial({
-      color: 0x38bdf8,
+      color: 0xffffff,
       transparent: true,
-      opacity: 0.25,
+      opacity: 0.3,
       blending: THREE.AdditiveBlending,
     });
 
@@ -387,7 +428,7 @@ export class GameEngine {
     }
   }
 
-  // --- Controls & Input ---
+  // --- Controls & Action Triggers ---
   public moveLeft() {
     if (this.status !== 'PLAYING') return;
     if (this.targetLane > -1) {
@@ -408,10 +449,17 @@ export class GameEngine {
     if (this.status !== 'PLAYING') return;
     if (!this.isJumping) {
       this.isJumping = true;
-      this.velocityY = 17;
+      // Super Sneakers jump boost! (Allows leaping over entire trains!)
+      this.velocityY = this.stats.sneakersActive ? 25.5 : 18.0;
       this.isSliding = false;
       this.slideTimer = 0;
-      soundManager.playJump();
+
+      if (this.stats.sneakersActive) {
+        soundManager.playSuperBounce();
+        this.emitBurst(this.runnerX, this.runnerY + 0.2, 0, 0xf59e0b, 14);
+      } else {
+        soundManager.playJump();
+      }
     }
   }
 
@@ -419,20 +467,71 @@ export class GameEngine {
     if (this.status !== 'PLAYING') return;
     if (!this.isSliding) {
       this.isSliding = true;
-      this.slideTimer = 0.65; // duration of slide
-      // Fast fall if sliding mid-air
+      this.slideTimer = 0.65;
       if (this.isJumping) {
-        this.velocityY = -22;
+        this.velocityY = -26; // Fast drop & roll
       }
       soundManager.playSlide();
     }
+  }
+
+  /**
+   * Activates the Subway Surfers Hoverboard with crash immunity
+   */
+  public activateHoverboard(): boolean {
+    if (this.status !== 'PLAYING' || this.stats.hoverboardActive) return false;
+    if (this.stats.hoverboardsAvailable <= 0) return false;
+
+    this.stats.hoverboardActive = true;
+    this.stats.hoverboardTimeLeft = 30; // 30s hoverboard ride
+    this.stats.hoverboardsAvailable -= 1;
+    this.runnerNodes.hoverboardMesh.visible = true;
+    soundManager.playPowerup();
+    this.emitBurst(this.runnerX, this.runnerY + 0.2, 0, 0x06b6d4, 25);
+
+    try {
+      localStorage.setItem('corrida_infinita_boards', String(this.stats.hoverboardsAvailable));
+    } catch {}
+
+    this.onStatsUpdate?.({ ...this.stats });
+    return true;
+  }
+
+  public handleSpacePress() {
+    if (this.status === 'TITLE') {
+      this.startGame();
+      return;
+    }
+    if (this.status === 'GAMEOVER') {
+      this.restartGame();
+      return;
+    }
+
+    // Double-tap Space triggers Hoverboard!
+    const now = performance.now();
+    if (now - this.lastSpacePressTime < 320) {
+      this.activateHoverboard();
+    } else {
+      this.jump();
+    }
+    this.lastSpacePressTime = now;
   }
 
   // --- Game Lifecycle ---
   public startGame() {
     this.status = 'PLAYING';
     this.resetStats();
+
+    // Start with authentic Subway Surfers chase sequence!
+    soundManager.playSprayCan();
+    setTimeout(() => soundManager.playWhistle(), 250);
+    setTimeout(() => soundManager.playDogBark(), 500);
     soundManager.startMusic();
+
+    this.inspectorZ = 3.0;
+    this.inspectorTargetZ = 3.2;
+    this.inspectorActive = true;
+    this.chaseAlertTimer = 8.0; // Chase stays close for initial 8 seconds
   }
 
   public pauseGame() {
@@ -456,24 +555,25 @@ export class GameEngine {
     this.currentLane = 0;
     this.runnerX = 0;
     this.runnerY = 0;
+    this.baseY = 0;
     this.velocityY = 0;
     this.isJumping = false;
     this.isSliding = false;
     this.slideTimer = 0;
-    this.nextObstacleZ = -40;
-    this.nextPowerUpDistance = 250;
+    this.nextObstacleZ = -50;
+    this.nextPowerUpDistance = 180;
     this.startGame();
   }
 
   private resetStats() {
     let savedHighScore = 0;
     let savedTotalCoins = 0;
+    let savedBoards = 3;
     try {
       savedHighScore = parseInt(localStorage.getItem('corrida_infinita_highscore') || '0', 10);
       savedTotalCoins = parseInt(localStorage.getItem('corrida_infinita_total_coins') || '0', 10);
-    } catch {
-      // Fallback if localStorage disabled
-    }
+      savedBoards = parseInt(localStorage.getItem('corrida_infinita_boards') || '3', 10);
+    } catch {}
 
     this.stats = {
       score: 0,
@@ -482,26 +582,58 @@ export class GameEngine {
       totalCoins: isNaN(savedTotalCoins) ? 0 : savedTotalCoins,
       distance: 0,
       speed: 24,
-      shieldActive: false,
+      scoreMultiplier: 30, // Subway Surfers standard 30x
+      hoverboardActive: false,
+      hoverboardTimeLeft: 0,
+      hoverboardsAvailable: isNaN(savedBoards) ? 3 : Math.max(1, savedBoards),
+      jetpackActive: false,
+      jetpackTimeLeft: 0,
+      sneakersActive: false,
+      sneakersTimeLeft: 0,
       magnetActive: false,
-      multiplierActive: false,
       magnetTimeLeft: 0,
+      multiplierActive: false,
       multiplierTimeLeft: 0,
+      shieldActive: false,
       newHighScore: false,
+      mysteryBoxesCollected: 0,
+      lettersCollected: [],
+      inspectorAlert: true,
     };
+
+    this.runnerNodes.hoverboardMesh.visible = false;
+    this.runnerNodes.jetpackMesh.visible = false;
+    this.runnerNodes.magnetFx.visible = false;
     this.onStatsUpdate?.(this.stats);
+  }
+
+  /**
+   * Stumble event: when player bumps or lands poorly, Inspector catches up!
+   */
+  public triggerStumble() {
+    if (this.status !== 'PLAYING') return;
+    this.inspectorZ = 2.4; // Inspector gets right behind you!
+    this.chaseAlertTimer = 5.0;
+    this.stats.inspectorAlert = true;
+    soundManager.playWhistle();
+    soundManager.playDogBark();
+    this.cameraShake = 0.35;
   }
 
   private triggerGameOver() {
     this.status = 'GAMEOVER';
-    this.cameraShake = 0.8;
+    this.cameraShake = 0.9;
     this.hitstopTimer = 0.08;
     soundManager.playCrash();
     soundManager.stopMusic();
 
-    this.emitBurst(this.runnerX, this.runnerY + 1, 0, 0xef4444, 30);
+    this.emitBurst(this.runnerX, this.runnerY + 1, 0, 0xef4444, 35);
 
-    // Save high score and total coins safely
+    // Inspector runs in to catch player!
+    this.inspectorZ = 0.8;
+    this.inspectorNodes.group.position.set(this.runnerX, this.runnerY, 0.8);
+    this.dogNodes.group.position.set(this.runnerX - 0.7, this.runnerY, 1.1);
+
     try {
       if (this.stats.score > this.stats.highScore) {
         this.stats.highScore = this.stats.score;
@@ -510,9 +642,7 @@ export class GameEngine {
       }
       this.stats.totalCoins += this.stats.coins;
       localStorage.setItem('corrida_infinita_total_coins', String(this.stats.totalCoins));
-    } catch {
-      // Storage restricted
-    }
+    } catch {}
 
     this.onGameOver?.(this.stats);
     this.onStatsUpdate?.(this.stats);
@@ -536,64 +666,136 @@ export class GameEngine {
   }
 
   // --- Spawning System ---
-  private updateSpawning(dt: number) {
+  private updateSpawning(_dt: number) {
     if (this.status !== 'PLAYING') return;
 
-    // Check if we need to spawn next obstacle wave
-    // Maintain obstacles ahead up to Z = -160
     while (this.nextObstacleZ > -160) {
       this.spawnObstacleWave(this.nextObstacleZ);
-      // Gap scales inversely with speed to maintain fair reaction time (minimum 25m, max 45m)
-      const gap = Math.max(25, 42 - (this.stats.speed - 24) * 0.25);
+      const gap = Math.max(28, 44 - (this.stats.speed - 24) * 0.28);
       this.nextObstacleZ -= gap;
     }
 
-    // Powerup check
     if (this.stats.distance >= this.nextPowerUpDistance) {
-      this.spawnPowerUp(this.nextObstacleZ - 10);
-      this.nextPowerUpDistance += 280 + Math.random() * 150;
+      this.spawnPowerUp(this.nextObstacleZ - 12);
+      this.nextPowerUpDistance += 190 + Math.random() * 110;
     }
   }
 
   private spawnObstacleWave(z: number) {
-    const types: ObstacleType[] = ['BARRIER', 'HIGH_BEAM', 'DRONE', 'ROAD_BLOCK'];
-    // Pick 1 or 2 lanes to block (NEVER block all 3 lanes, always at least 1 open or jumpable/slideable lane)
-    const blockedCount = Math.random() > 0.4 ? 2 : 1;
     const lanes: LaneIndex[] = [-1, 0, 1];
-    // Shuffle lanes
     for (let i = lanes.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
       [lanes[i], lanes[j]] = [lanes[j], lanes[i]];
     }
 
-    for (let i = 0; i < blockedCount; i++) {
-      const lane = lanes[i];
-      const type = types[Math.floor(Math.random() * types.length)];
+    // 60% chance of spawning subway trains (stationary, with ramp, or MOVING towards player!)
+    const spawnTrain = Math.random() > 0.4;
+
+    if (spawnTrain) {
+      const trainLane = lanes[0];
+      const roll = Math.random();
+      let type: ObstacleType = 'TRAIN';
+      let isMoving = false;
+
+      if (roll < 0.35) {
+        type = 'TRAIN_RAMP';
+      } else if (roll < 0.7 && this.stats.distance > 80) {
+        type = 'TRAIN_MOVING';
+        isMoving = true;
+      } else {
+        type = 'TRAIN';
+      }
+
       const mesh = createObstacleModel(type);
-      mesh.position.set(lane * LANE_WIDTH, 0, z);
+      mesh.position.set(trainLane * TRACK_WIDTH, 0, z);
       this.scene.add(mesh);
 
       this.obstacles.push({
         id: ++this.objectIdCounter,
         mesh,
         type,
-        lane,
+        lane: trainLane,
         z,
         cleared: false,
         box: new THREE.Box3(),
+        isMoving,
+        hornPlayed: false,
       });
-    }
 
-    // In the free lane(s), spawn a trail of coins!
-    const freeLane = lanes[blockedCount === 1 ? (Math.random() > 0.5 ? 1 : 2) : 2];
-    this.spawnCoinTrail(freeLane, z - 8, 4);
+      // If train has ramp, spawn rooftop coins!
+      if (type === 'TRAIN_RAMP') {
+        for (let c = 0; c < 4; c++) {
+          const coinZ = z - c * 2.8;
+          const coinMesh = createCoinModel();
+          coinMesh.position.set(trainLane * TRACK_WIDTH, TRAIN_ROOF_HEIGHT + 0.1, coinZ);
+          this.scene.add(coinMesh);
+
+          this.coins.push({
+            id: ++this.objectIdCounter,
+            mesh: coinMesh,
+            lane: trainLane,
+            z: coinZ,
+            y: TRAIN_ROOF_HEIGHT + 0.1,
+            collected: false,
+          });
+        }
+      }
+
+      // Secondary obstacle in another lane
+      if (Math.random() > 0.5) {
+        const otherLane = lanes[1];
+        const secType: ObstacleType = Math.random() > 0.5 ? 'BARRIER' : 'HIGH_BEAM';
+        const secMesh = createObstacleModel(secType);
+        secMesh.position.set(otherLane * TRACK_WIDTH, 0, z);
+        this.scene.add(secMesh);
+
+        this.obstacles.push({
+          id: ++this.objectIdCounter,
+          mesh: secMesh,
+          type: secType,
+          lane: otherLane,
+          z,
+          cleared: false,
+          box: new THREE.Box3(),
+        });
+      }
+
+      // Safe lane coins
+      const freeLane = lanes[2];
+      this.spawnCoinTrail(freeLane, z - 6, 5, 0);
+    } else {
+      // Classic hurdles, high beams, or buffer stops
+      const types: ObstacleType[] = ['BARRIER', 'HIGH_BEAM', 'ROAD_BLOCK'];
+      const blockedCount = Math.random() > 0.4 ? 2 : 1;
+
+      for (let i = 0; i < blockedCount; i++) {
+        const lane = lanes[i];
+        const type = types[Math.floor(Math.random() * types.length)];
+        const mesh = createObstacleModel(type);
+        mesh.position.set(lane * TRACK_WIDTH, 0, z);
+        this.scene.add(mesh);
+
+        this.obstacles.push({
+          id: ++this.objectIdCounter,
+          mesh,
+          type,
+          lane,
+          z,
+          cleared: false,
+          box: new THREE.Box3(),
+        });
+      }
+
+      const freeLane = lanes[blockedCount === 1 ? (Math.random() > 0.5 ? 1 : 2) : 2];
+      this.spawnCoinTrail(freeLane, z - 8, 4, 0);
+    }
   }
 
-  private spawnCoinTrail(lane: LaneIndex, startZ: number, count: number) {
+  private spawnCoinTrail(lane: LaneIndex, startZ: number, count: number, yOffset: number = 0) {
     for (let i = 0; i < count; i++) {
-      const z = startZ - i * 3.5;
+      const z = startZ - i * 3.4;
       const mesh = createCoinModel();
-      mesh.position.set(lane * LANE_WIDTH, 0, z);
+      mesh.position.set(lane * TRACK_WIDTH, yOffset, z);
       this.scene.add(mesh);
 
       this.coins.push({
@@ -601,20 +803,33 @@ export class GameEngine {
         mesh,
         lane,
         z,
-        y: 0,
+        y: yOffset,
         collected: false,
       });
     }
   }
 
   private spawnPowerUp(z: number) {
-    const types: PowerUpType[] = ['MAGNET', 'SHIELD', 'MULTIPLIER'];
-    const type = types[Math.floor(Math.random() * types.length)];
+    // Powerups: MAGNET, JETPACK, SNEAKERS, MULTIPLIER, HOVERBOARD, MYSTERY_BOX, WORD HUNT LETTERS
+    const powerupList: PowerUpType[] = [
+      'MAGNET',
+      'JETPACK',
+      'SNEAKERS',
+      'MULTIPLIER',
+      'HOVERBOARD',
+      'MYSTERY_BOX',
+      'LETTER_S',
+      'LETTER_U',
+      'LETTER_R',
+      'LETTER_F',
+    ];
+
+    const type = powerupList[Math.floor(Math.random() * powerupList.length)];
     const lanes: LaneIndex[] = [-1, 0, 1];
     const lane = lanes[Math.floor(Math.random() * lanes.length)];
 
     const mesh = createPowerUpModel(type);
-    mesh.position.set(lane * LANE_WIDTH, 0, z);
+    mesh.position.set(lane * TRACK_WIDTH, 0, z);
     this.scene.add(mesh);
 
     this.powerUps.push({
@@ -627,13 +842,13 @@ export class GameEngine {
     });
   }
 
-  // --- Main Tick / Animation Loop ---
+  // --- Animation / Render Loop ---
   private loop(time: number) {
     if (this.isDestroyed) return;
 
     const rawDt = (time - this.lastTime) / 1000;
     this.lastTime = time;
-    const dt = Math.min(rawDt, 0.05); // Clamp dt to prevent tunneling on lag spike
+    const dt = Math.min(rawDt, 0.05);
 
     if (this.hitstopTimer > 0) {
       this.hitstopTimer -= dt;
@@ -647,34 +862,61 @@ export class GameEngine {
   }
 
   private update(dt: number) {
-    // 1. Title mode camera orbit & subtle idle runner breathing
     if (this.status === 'TITLE') {
       const elapsed = performance.now() * 0.001;
-      this.camera.position.x = Math.sin(elapsed * 0.5) * 4;
-      this.camera.position.y = 2.8 + Math.cos(elapsed * 0.7) * 0.4;
-      this.camera.position.z = 6.5;
-      this.camera.lookAt(0, 1.2, -4);
+      this.camera.position.x = Math.sin(elapsed * 0.45) * 4.2;
+      this.camera.position.y = 2.8 + Math.cos(elapsed * 0.6) * 0.35;
+      this.camera.position.z = 6.8;
+      this.camera.lookAt(0, 1.3, -6);
 
-      // Idle breathing for runner
+      // Jake idle spray paint pose
       this.runnerNodes.torso.position.y = 1.0 + Math.sin(elapsed * 3) * 0.02;
-      this.runnerNodes.leftArm.rotation.x = Math.sin(elapsed * 2) * 0.1;
-      this.runnerNodes.rightArm.rotation.x = -Math.sin(elapsed * 2) * 0.1;
+      this.runnerNodes.rightArm.rotation.x = -0.5 + Math.sin(elapsed * 4) * 0.2;
+      this.runnerNodes.leftArm.rotation.x = 0.2;
+
+      // Inspector and dog idle behind
+      this.inspectorNodes.group.position.set(0.6, 0, 3.8);
+      this.dogNodes.group.position.set(-0.6, 0, 4.2);
+      this.dogNodes.tail.rotation.z = Math.sin(elapsed * 8) * 0.4;
       return;
     }
 
     if (this.status !== 'PLAYING') return;
 
-    // 2. Speed progression: ramps up smoothly with distance
-    this.stats.speed = Math.min(64, 24 + this.stats.distance * 0.014);
+    // 1. Speed ramp
+    this.stats.speed = Math.min(65, 24 + this.stats.distance * 0.015);
     const speed = this.stats.speed;
     const distanceDelta = speed * dt;
     this.stats.distance += distanceDelta;
 
-    // Score calculation (10 pts per meter, doubled if multiplier active)
-    const pointsPerMeter = this.stats.multiplierActive ? 20 : 10;
-    this.stats.score += Math.round(distanceDelta * pointsPerMeter);
+    const baseMult = this.stats.scoreMultiplier;
+    const activeMult = this.stats.multiplierActive ? baseMult * 2 : baseMult;
+    this.stats.score += Math.round(distanceDelta * (activeMult / 3));
 
-    // 3. Powerup Timers
+    // 2. Powerup Timers
+    if (this.stats.hoverboardActive) {
+      this.stats.hoverboardTimeLeft -= dt;
+      if (this.stats.hoverboardTimeLeft <= 0) {
+        this.stats.hoverboardActive = false;
+        this.runnerNodes.hoverboardMesh.visible = false;
+      }
+    }
+
+    if (this.stats.jetpackActive) {
+      this.stats.jetpackTimeLeft -= dt;
+      if (this.stats.jetpackTimeLeft <= 0) {
+        this.stats.jetpackActive = false;
+        this.runnerNodes.jetpackMesh.visible = false;
+      }
+    }
+
+    if (this.stats.sneakersActive) {
+      this.stats.sneakersTimeLeft -= dt;
+      if (this.stats.sneakersTimeLeft <= 0) {
+        this.stats.sneakersActive = false;
+      }
+    }
+
     if (this.stats.magnetActive) {
       this.stats.magnetTimeLeft -= dt;
       if (this.stats.magnetTimeLeft <= 0) {
@@ -690,32 +932,114 @@ export class GameEngine {
       }
     }
 
-    // 4. Runner Physics & Kinematics
-    // Lane switching with exponential damping
-    const targetX = this.targetLane * LANE_WIDTH;
+    // 3. Inspector & Dog Chase Logic
+    if (this.chaseAlertTimer > 0) {
+      this.chaseAlertTimer -= dt;
+      this.inspectorTargetZ = 3.2; // Stay right on your tail!
+      this.stats.inspectorAlert = true;
+    } else {
+      this.inspectorTargetZ = 16.0; // Fall behind when running clean
+      this.stats.inspectorAlert = false;
+    }
+
+    this.inspectorZ += (this.inspectorTargetZ - this.inspectorZ) * (1 - Math.exp(-2.5 * dt));
+
+    // Position Inspector and Dog in world
+    this.inspectorNodes.group.position.set(this.runnerX * 0.85, this.runnerY, this.inspectorZ);
+    this.dogNodes.group.position.set(this.runnerX * 0.85 - 0.75, this.runnerY, this.inspectorZ + 0.4);
+
+    // Inspector and Dog Running animations
+    this.inspectorRunCycle += dt * (speed * 0.75);
+    const inspLegSwing = Math.sin(this.inspectorRunCycle);
+    const inspArmSwing = Math.cos(this.inspectorRunCycle);
+
+    this.inspectorNodes.leftLeg.rotation.x = inspLegSwing * 0.9;
+    this.inspectorNodes.rightLeg.rotation.x = -inspLegSwing * 0.9;
+    this.inspectorNodes.leftArm.rotation.x = -inspArmSwing * 0.95;
+    this.inspectorNodes.rightArm.rotation.x = inspArmSwing * 0.95;
+    this.inspectorNodes.torso.rotation.x = 0.22;
+
+    const dogLegSwing = Math.sin(this.inspectorRunCycle * 1.5);
+    this.dogNodes.legFL.rotation.x = dogLegSwing * 0.8;
+    this.dogNodes.legFR.rotation.x = -dogLegSwing * 0.8;
+    this.dogNodes.legBL.rotation.x = -dogLegSwing * 0.8;
+    this.dogNodes.legBR.rotation.x = dogLegSwing * 0.8;
+    this.dogNodes.tail.rotation.z = Math.sin(this.inspectorRunCycle * 3) * 0.5;
+
+    // 4. Jetpack High Altitude Flight Target
+    if (this.stats.jetpackActive) {
+      this.baseY = 8.5; // Fly high in the sky above all obstacles!
+      if (Math.random() > 0.2) {
+        this.emitBurst(this.runnerX - 0.2, this.runnerY + 1.1, 0.4, 0xef4444, 2);
+        this.emitBurst(this.runnerX + 0.2, this.runnerY + 1.1, 0.4, 0xf59e0b, 2);
+      }
+    } else {
+      let onRoof = false;
+      for (const obs of this.obstacles) {
+        if (
+          (obs.type === 'TRAIN' || obs.type === 'TRAIN_RAMP' || obs.type === 'TRAIN_MOVING') &&
+          obs.lane === this.targetLane &&
+          obs.z > -6.0 &&
+          obs.z < 6.0 &&
+          this.runnerY >= TRAIN_ROOF_HEIGHT - 0.5
+        ) {
+          onRoof = true;
+          break;
+        }
+      }
+      this.baseY = onRoof ? TRAIN_ROOF_HEIGHT : 0;
+    }
+
+    // 5. Smooth Lane Switching
+    const targetX = this.targetLane * TRACK_WIDTH;
     const lateralSpeed = 16;
     const dx = targetX - this.runnerX;
     this.runnerX += dx * (1 - Math.exp(-lateralSpeed * dt));
 
-    // Banking roll angle when switching lanes
     const targetRoll = -dx * 0.12;
     this.rollAngle += (targetRoll - this.rollAngle) * (1 - Math.exp(-12 * dt));
     this.runnerNodes.group.rotation.z = this.rollAngle;
 
-    // Jump & Gravity
-    if (this.isJumping) {
-      this.runnerY += this.velocityY * dt;
-      this.velocityY -= 46 * dt; // Gravity
-      if (this.runnerY <= 0) {
-        this.runnerY = 0;
-        this.isJumping = false;
-        this.velocityY = 0;
-        // Landing dust puff
-        this.emitBurst(this.runnerX, 0.1, 0, 0x64748b, 8);
+    // 6. Jump, Gravity & Ramp Climbing
+    if (this.stats.jetpackActive) {
+      this.runnerY += (this.baseY - this.runnerY) * (1 - Math.exp(-5 * dt));
+      this.isJumping = false;
+      this.velocityY = 0;
+    } else {
+      let onRamp = false;
+      for (const obs of this.obstacles) {
+        if (obs.type === 'TRAIN_RAMP' && obs.lane === this.targetLane) {
+          if (obs.z > -8.5 && obs.z < -2.0) {
+            const rampProgress = ((-obs.z - 2.0) / 6.5);
+            if (rampProgress >= 0 && rampProgress <= 1) {
+              const targetRampY = rampProgress * TRAIN_ROOF_HEIGHT;
+              this.runnerY = Math.max(this.runnerY, targetRampY);
+              onRamp = true;
+            }
+          }
+        }
+      }
+
+      if (!onRamp) {
+        if (this.isJumping) {
+          this.runnerY += this.velocityY * dt;
+          this.velocityY -= 46 * dt; // Gravity
+          if (this.runnerY <= this.baseY) {
+            this.runnerY = this.baseY;
+            this.isJumping = false;
+            this.velocityY = 0;
+            this.emitBurst(this.runnerX, this.runnerY + 0.1, 0, 0x64748b, 8);
+          }
+        } else {
+          if (this.runnerY > this.baseY) {
+            this.runnerY += (this.baseY - this.runnerY) * (1 - Math.exp(-14 * dt));
+          } else {
+            this.runnerY = this.baseY;
+          }
+        }
       }
     }
 
-    // Slide logic
     if (this.isSliding) {
       this.slideTimer -= dt;
       if (this.slideTimer <= 0) {
@@ -723,169 +1047,206 @@ export class GameEngine {
       }
     }
 
-    // Update runner mesh positions
+    // Position runner group
     this.runnerNodes.group.position.set(this.runnerX, this.runnerY, 0);
 
-    // Articulated Running / Jumping / Sliding Animation
-    this.runCycle += dt * (speed * 0.7);
+    // Hoverboard particle trail
+    if (this.stats.hoverboardActive) {
+      this.runnerNodes.hoverboardMesh.rotation.z = -this.rollAngle * 0.8;
+      if (Math.random() > 0.4) {
+        this.emitBurst(this.runnerX, this.runnerY + 0.1, 0.4, 0x06b6d4, 2);
+      }
+    }
+
+    // Kinematics Animations
+    this.runCycle += dt * (speed * 0.72);
     const legSwing = Math.sin(this.runCycle);
     const armSwing = Math.cos(this.runCycle);
 
-    if (this.isSliding) {
-      // Crouch and slide pose
+    if (this.stats.hoverboardActive) {
+      // Surfing skate pose
+      this.runnerNodes.torso.position.y = 0.85;
+      this.runnerNodes.torso.rotation.x = 0;
+      this.runnerNodes.torso.rotation.y = 0.6; // turned sideways surfing stance
+      this.runnerNodes.leftLeg.rotation.x = -0.3;
+      this.runnerNodes.rightLeg.rotation.x = 0.3;
+      this.runnerNodes.leftArm.rotation.x = -0.4;
+      this.runnerNodes.rightArm.rotation.x = 0.4;
+    } else if (this.isSliding) {
       this.runnerNodes.torso.position.y = 0.45;
       this.runnerNodes.torso.rotation.x = 0.8;
+      this.runnerNodes.torso.rotation.y = 0;
       this.runnerNodes.leftLeg.rotation.x = -1.2;
       this.runnerNodes.rightLeg.rotation.x = -1.0;
       this.runnerNodes.leftArm.rotation.x = 0.6;
       this.runnerNodes.rightArm.rotation.x = 0.6;
-      this.runnerNodes.shadowMesh.scale.set(1.4, 1.4, 1.4);
     } else if (this.isJumping) {
-      // Mid-air pose
       this.runnerNodes.torso.position.y = 1.0;
       this.runnerNodes.torso.rotation.x = -0.15;
+      this.runnerNodes.torso.rotation.y = 0;
       this.runnerNodes.leftLeg.rotation.x = 0.4;
       this.runnerNodes.rightLeg.rotation.x = -0.2;
       this.runnerNodes.leftArm.rotation.x = -1.1;
       this.runnerNodes.rightArm.rotation.x = -1.1;
-      // Shrink contact shadow as player jumps high
-      const shadowScale = Math.max(0.2, 1 - this.runnerY * 0.25);
-      this.runnerNodes.shadowMesh.scale.set(shadowScale, shadowScale, shadowScale);
     } else {
-      // Regular sprint cycle
       this.runnerNodes.torso.position.y = 1.0 + Math.abs(legSwing) * 0.08;
-      this.runnerNodes.torso.rotation.x = 0.18; // slight forward sprint lean
+      this.runnerNodes.torso.rotation.x = 0.18;
+      this.runnerNodes.torso.rotation.y = 0;
       this.runnerNodes.leftLeg.rotation.x = legSwing * 0.85;
       this.runnerNodes.rightLeg.rotation.x = -legSwing * 0.85;
       this.runnerNodes.leftArm.rotation.x = -armSwing * 0.9;
       this.runnerNodes.rightArm.rotation.x = armSwing * 0.9;
-      this.runnerNodes.shadowMesh.scale.set(1, 1, 1);
     }
 
-    // 5. Scroll World (Road Chunks, Arches, Poles)
+    // 7. Scroll World & Handle Moving Trains
     const moveZ = speed * dt;
 
-    // Road chunks recycle
-    for (const chunk of this.roadChunks) {
+    for (const chunk of this.trackChunks) {
       chunk.z += moveZ;
       if (chunk.z > 35) {
-        chunk.z -= 6 * 50; // Recycle to the far distance
+        chunk.z -= 6 * 50;
       }
       chunk.mesh.position.z = chunk.z;
     }
 
-    // Texture continuous offset scrolling
-    this.roadTexture.offset.y -= (speed * dt) / 50;
+    this.trackTexture.offset.y -= (speed * dt) / 50;
 
-    // Overhead highway arches
-    for (const arch of this.arches) {
-      arch.z += moveZ;
-      if (arch.z > 25) {
-        arch.z -= 5 * 55;
+    for (const tunnel of this.tunnels) {
+      tunnel.z += moveZ;
+      if (tunnel.z > 25) {
+        tunnel.z -= 4 * 65;
       }
-      arch.mesh.position.z = arch.z;
+      tunnel.mesh.position.z = tunnel.z;
     }
 
-    // Street light poles
-    for (const pole of this.lightPoles) {
-      pole.z += moveZ;
-      if (pole.z > 25) {
-        pole.z -= 12 * 22;
+    for (const post of this.signalPosts) {
+      post.z += moveZ;
+      if (post.z > 25) {
+        post.z -= 10 * 26;
       }
-      pole.mesh.position.z = pole.z;
+      post.mesh.position.z = post.z;
     }
 
-    // Next obstacle spawn anchor moves towards player
     this.nextObstacleZ += moveZ;
     this.updateSpawning(dt);
 
-    // 6. Move & Check Obstacles
-    const playerBounds = this.getPlayerBoundingBox();
+    // 8. Check Obstacle Collisions & Moving Trains
+    if (!this.stats.jetpackActive) {
+      const playerBounds = this.getPlayerBoundingBox();
 
-    for (let i = this.obstacles.length - 1; i >= 0; i--) {
-      const obs = this.obstacles[i];
-      obs.z += moveZ;
-      obs.mesh.position.z = obs.z;
+      for (let i = this.obstacles.length - 1; i >= 0; i--) {
+        const obs = this.obstacles[i];
 
-      // Animate drone hovering
-      if (obs.type === 'DRONE') {
-        const droneGroup = obs.mesh.getObjectByName('droneAnimated');
-        if (droneGroup) {
-          droneGroup.position.y = 1.25 + Math.sin(performance.now() * 0.005 + obs.id) * 0.2;
+        // If obstacle is a moving train, it rushes forward with extra speed!
+        const extraSpeed = obs.isMoving ? 16 * dt : 0;
+        obs.z += moveZ + extraSpeed;
+        obs.mesh.position.z = obs.z;
+
+        // Train Horn Alert when approaching player
+        if (obs.isMoving && !obs.hornPlayed && obs.z > -70 && obs.z < -25) {
+          obs.hornPlayed = true;
+          soundManager.playTrainHorn();
         }
-      }
 
-      // Check collision if obstacle is near player (Z between -1.5 and 1.5)
-      if (!obs.cleared && obs.z > -2.2 && obs.z < 2.0) {
-        obs.box.setFromObject(obs.mesh);
-        // Slightly shrink obstacle box for fair, forgiving collision feel
-        obs.box.expandByScalar(-0.15);
+        const isTrain = obs.type === 'TRAIN' || obs.type === 'TRAIN_RAMP' || obs.type === 'TRAIN_MOVING';
+        const zNear = isTrain ? -7.0 : -2.2;
+        const zFar = isTrain ? 7.0 : 2.0;
 
-        if (playerBounds.intersectsBox(obs.box)) {
-          if (this.stats.shieldActive) {
-            // Shield absorbs hit!
-            this.stats.shieldActive = false;
-            this.runnerNodes.shieldMesh.visible = false;
-            soundManager.playShieldBreak();
-            this.emitBurst(obs.mesh.position.x, 1, obs.z, 0x38bdf8, 20);
-            this.scene.remove(obs.mesh);
-            this.obstacles.splice(i, 1);
-            this.cameraShake = 0.4;
+        if (!obs.cleared && obs.z > zNear && obs.z < zFar) {
+          if (isTrain && this.runnerY >= TRAIN_ROOF_HEIGHT - 0.2) {
             continue;
-          } else {
-            // Fatal collision
-            this.triggerGameOver();
-            return;
+          }
+
+          if (obs.type === 'TRAIN_RAMP' && obs.lane === this.targetLane && obs.z < -2.0) {
+            continue;
+          }
+
+          obs.box.setFromObject(obs.mesh);
+          obs.box.expandByScalar(-0.16);
+
+          if (playerBounds.intersectsBox(obs.box)) {
+            // Hoverboard Crash Protection!
+            if (this.stats.hoverboardActive) {
+              this.stats.hoverboardActive = false;
+              this.runnerNodes.hoverboardMesh.visible = false;
+              soundManager.playShieldBreak();
+              this.emitBurst(obs.mesh.position.x, this.runnerY + 0.5, obs.z, 0x06b6d4, 30);
+              this.cameraShake = 0.5;
+              this.hitstopTimer = 0.06;
+              this.scene.remove(obs.mesh);
+              this.obstacles.splice(i, 1);
+              continue;
+            } else if (this.stats.shieldActive) {
+              this.stats.shieldActive = false;
+              soundManager.playShieldBreak();
+              this.emitBurst(obs.mesh.position.x, 1, obs.z, 0x38bdf8, 22);
+              this.scene.remove(obs.mesh);
+              this.obstacles.splice(i, 1);
+              this.cameraShake = 0.45;
+              continue;
+            } else {
+              // Fatal Crash!
+              this.triggerGameOver();
+              return;
+            }
           }
         }
-      }
 
-      // Clear obstacles that passed behind camera
-      if (obs.z > 25) {
-        this.scene.remove(obs.mesh);
-        this.obstacles.splice(i, 1);
+        const maxPassZ = isTrain ? 35 : 25;
+        if (obs.z > maxPassZ) {
+          this.scene.remove(obs.mesh);
+          this.obstacles.splice(i, 1);
+        }
+      }
+    } else {
+      for (let i = this.obstacles.length - 1; i >= 0; i--) {
+        const obs = this.obstacles[i];
+        obs.z += moveZ;
+        obs.mesh.position.z = obs.z;
+        if (obs.z > 35) {
+          this.scene.remove(obs.mesh);
+          this.obstacles.splice(i, 1);
+        }
       }
     }
 
-    // 7. Move & Collect Coins
+    // 9. Move & Collect Coins
     for (let i = this.coins.length - 1; i >= 0; i--) {
       const coin = this.coins[i];
       coin.z += moveZ;
 
-      // Spin coin
       const spinGroup = coin.mesh.getObjectByName('coinSpinGroup');
       if (spinGroup) {
         spinGroup.rotation.y += dt * 4;
       }
 
-      // Magnet effect: suck coin towards player
-      if (this.stats.magnetActive && coin.z > -25 && coin.z < 10) {
+      const shouldMagnetize = this.stats.magnetActive || this.stats.jetpackActive;
+      if (shouldMagnetize && coin.z > -28 && coin.z < 12) {
         const coinPos = coin.mesh.position;
-        const dx = this.runnerX - coinPos.x;
-        const dy = (this.runnerY + 1) - coinPos.y;
-        const dz = 0 - coinPos.z;
-        const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        const cdx = this.runnerX - coinPos.x;
+        const cdy = (this.runnerY + 1) - coinPos.y;
+        const cdz = 0 - coinPos.z;
+        const dist = Math.sqrt(cdx * cdx + cdy * cdy + cdz * cdz);
         if (dist > 0.1) {
-          const pullSpeed = 24 * dt;
-          coinPos.x += (dx / dist) * pullSpeed;
-          coinPos.y += (dy / dist) * pullSpeed;
-          coinPos.z += (dz / dist) * pullSpeed;
+          const pullSpeed = 30 * dt;
+          coinPos.x += (cdx / dist) * pullSpeed;
+          coinPos.y += (cdy / dist) * pullSpeed;
+          coinPos.z += (cdz / dist) * pullSpeed;
           coin.z = coinPos.z;
         }
       } else {
         coin.mesh.position.z = coin.z;
       }
 
-      // Collect detection
       const coinPos = coin.mesh.position;
       const distX = Math.abs(coinPos.x - this.runnerX);
       const distY = Math.abs((this.runnerY + 0.9) - coinPos.y);
       const distZ = Math.abs(coinPos.z - 0);
 
-      if (!coin.collected && distX < 1.1 && distY < 1.4 && distZ < 1.4) {
+      if (!coin.collected && distX < 1.25 && distY < 1.5 && distZ < 1.5) {
         coin.collected = true;
         this.stats.coins += 1;
-        this.stats.score += this.stats.multiplierActive ? 50 : 25;
+        this.stats.score += this.stats.multiplierActive ? 60 : 30;
         soundManager.playCoin();
         this.emitBurst(coinPos.x, coinPos.y, coinPos.z, 0xfbbf24, 10);
         this.scene.remove(coin.mesh);
@@ -899,7 +1260,7 @@ export class GameEngine {
       }
     }
 
-    // 8. Move & Collect Powerups
+    // 10. Move & Collect Powerups
     for (let i = this.powerUps.length - 1; i >= 0; i--) {
       const pu = this.powerUps[i];
       pu.z += moveZ;
@@ -915,11 +1276,10 @@ export class GameEngine {
       const distY = Math.abs((this.runnerY + 0.9) - 1.0);
       const distZ = Math.abs(pu.z - 0);
 
-      if (!pu.collected && distX < 1.2 && distY < 1.6 && distZ < 1.5) {
+      if (!pu.collected && distX < 1.3 && distY < 1.7 && distZ < 1.6) {
         pu.collected = true;
-        soundManager.playPowerup();
         this.applyPowerUp(pu.type);
-        this.emitBurst(puPos.x, 1, pu.z, 0x06b6d4, 18);
+        this.emitBurst(puPos.x, 1, pu.z, 0x06b6d4, 25);
         this.scene.remove(pu.mesh);
         this.powerUps.splice(i, 1);
         continue;
@@ -931,14 +1291,14 @@ export class GameEngine {
       }
     }
 
-    // 9. Particles simulation
+    // 11. Particle System
     for (const p of this.particles) {
       if (p.life > 0) {
         p.life -= dt;
         p.mesh.position.x += p.vx * dt;
         p.mesh.position.y += p.vy * dt;
         p.mesh.position.z += p.vz * dt;
-        p.vy -= 12 * dt; // gravity
+        p.vy -= 12 * dt;
 
         const alpha = Math.max(0, p.life / p.maxLife);
         (p.mesh.material as THREE.MeshBasicMaterial).opacity = alpha;
@@ -949,7 +1309,7 @@ export class GameEngine {
       }
     }
 
-    // 10. Speed Lines animation
+    // 12. Speed Lines
     const posAttr = this.speedLines.geometry.attributes.position as THREE.BufferAttribute;
     const posArray = posAttr.array as Float32Array;
     const lineSpeed = speed * 1.5;
@@ -967,42 +1327,98 @@ export class GameEngine {
     }
     posAttr.needsUpdate = true;
 
-    // 11. Camera Follow & Dynamic Breathing
+    // 13. Dynamic Camera
     const targetCamX = this.runnerX * 0.35;
-    this.camera.position.x += (targetCamX - this.camera.position.x) * (1 - Math.exp(-8 * dt));
-    const targetCamY = 3.6 + this.runnerY * 0.25;
-    this.camera.position.y += (targetCamY - this.camera.position.y) * (1 - Math.exp(-10 * dt));
+    const targetCamY = 3.6 + this.runnerY * 0.45;
+    const targetCamZ = 7.5;
 
-    // Dynamic FOV based on speed (gives intense sense of velocity)
-    const targetFov = 65 + (speed - 24) * 0.35;
+    this.camera.position.x += (targetCamX - this.camera.position.x) * (1 - Math.exp(-8 * dt));
+    this.camera.position.y += (targetCamY - this.camera.position.y) * (1 - Math.exp(-10 * dt));
+    this.camera.position.z += (targetCamZ - this.camera.position.z) * (1 - Math.exp(-6 * dt));
+
+    const targetFov = (this.stats.jetpackActive ? 75 : 65) + (speed - 24) * 0.35;
     this.camera.fov += (targetFov - this.camera.fov) * (1 - Math.exp(-5 * dt));
     this.camera.updateProjectionMatrix();
 
-    // Camera lookAt
-    this.camera.lookAt(this.runnerX * 0.2, 1.4, -12);
+    this.camera.lookAt(this.runnerX * 0.2, 1.4 + this.runnerY * 0.4, -12);
 
-    // Apply camera shake if any
     if (this.cameraShake > 0) {
       this.camera.position.x += (Math.random() - 0.5) * this.cameraShake * 0.6;
       this.camera.position.y += (Math.random() - 0.5) * this.cameraShake * 0.6;
       this.cameraShake = Math.max(0, this.cameraShake - dt * 2.5);
     }
 
-    // Report stats to React HUD
     this.onStatsUpdate?.({ ...this.stats });
   }
 
   private applyPowerUp(type: PowerUpType) {
     if (type === 'MAGNET') {
+      soundManager.playPowerup();
       this.stats.magnetActive = true;
-      this.stats.magnetTimeLeft = 10; // 10s magnet
+      this.stats.magnetTimeLeft = 14;
       this.runnerNodes.magnetFx.visible = true;
-    } else if (type === 'SHIELD') {
-      this.stats.shieldActive = true;
-      this.runnerNodes.shieldMesh.visible = true;
+    } else if (type === 'JETPACK') {
+      soundManager.playPowerup();
+      this.stats.jetpackActive = true;
+      this.stats.jetpackTimeLeft = 10;
+      this.runnerNodes.jetpackMesh.visible = true;
+      // High altitude coin trails
+      for (let c = 0; c < 16; c++) {
+        const lane = (c % 3 - 1) as LaneIndex;
+        const coinZ = -15 - c * 4;
+        const mesh = createCoinModel();
+        mesh.position.set(lane * TRACK_WIDTH, 8.5, coinZ);
+        this.scene.add(mesh);
+        this.coins.push({
+          id: ++this.objectIdCounter,
+          mesh,
+          lane,
+          z: coinZ,
+          y: 8.5,
+          collected: false,
+        });
+      }
+    } else if (type === 'SNEAKERS') {
+      soundManager.playSuperBounce();
+      this.stats.sneakersActive = true;
+      this.stats.sneakersTimeLeft = 15;
+    } else if (type === 'HOVERBOARD') {
+      soundManager.playPowerup();
+      this.stats.hoverboardActive = true;
+      this.stats.hoverboardTimeLeft = 30;
+      this.runnerNodes.hoverboardMesh.visible = true;
     } else if (type === 'MULTIPLIER') {
+      soundManager.playPowerup();
       this.stats.multiplierActive = true;
-      this.stats.multiplierTimeLeft = 12; // 12s 2x multiplier
+      this.stats.multiplierTimeLeft = 16;
+    } else if (type === 'MYSTERY_BOX') {
+      soundManager.playMysteryBox();
+      this.stats.mysteryBoxesCollected += 1;
+      // Surprise mystery gift!
+      const gifts = ['coins_250', 'coins_500', 'board', 'sneakers'];
+      const gift = gifts[Math.floor(Math.random() * gifts.length)];
+      if (gift === 'coins_250') {
+        this.stats.coins += 250;
+      } else if (gift === 'coins_500') {
+        this.stats.coins += 500;
+      } else if (gift === 'board') {
+        this.stats.hoverboardsAvailable += 1;
+      } else {
+        this.stats.sneakersActive = true;
+        this.stats.sneakersTimeLeft = 15;
+      }
+    } else if (type.startsWith('LETTER_')) {
+      soundManager.playPowerup();
+      const letter = type.replace('LETTER_', '');
+      if (!this.stats.lettersCollected.includes(letter)) {
+        this.stats.lettersCollected.push(letter);
+        // Check if all S-U-R-F collected!
+        if (['S', 'U', 'R', 'F'].every((l) => this.stats.lettersCollected.includes(l))) {
+          soundManager.playMysteryBox();
+          this.stats.coins += 1000; // Mega Word Hunt Jackpot!
+          this.stats.hoverboardsAvailable += 2;
+        }
+      }
     }
   }
 
@@ -1011,11 +1427,9 @@ export class GameEngine {
     const halfWidth = 0.38;
 
     if (this.isSliding) {
-      // Crouch collider: height 0.65, depth 1.1
       box.min.set(this.runnerX - halfWidth, this.runnerY, -0.6);
       box.max.set(this.runnerX + halfWidth, this.runnerY + 0.65, 0.6);
     } else {
-      // Normal / jumping collider: height 1.85, depth 0.45
       box.min.set(this.runnerX - halfWidth, this.runnerY, -0.35);
       box.max.set(this.runnerX + halfWidth, this.runnerY + 1.85, 0.35);
     }
